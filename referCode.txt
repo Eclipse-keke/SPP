@@ -1,0 +1,150 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <cmath>
+#include <string>
+#include <Eigen/Dense>
+
+using namespace std;
+using namespace Eigen;
+
+struct PositioningResult {
+    MatrixXd llh;
+    MatrixXd xyz;
+    MatrixXd bs;
+    VectorXd br;
+    MatrixXd elevation;
+};
+
+struct DistError {
+    VectorXd horizontal;
+    VectorXd EW;
+    VectorXd NS;
+    VectorXd height;
+};
+
+struct Model {
+    MatrixXd tropo;
+    MatrixXd iono;
+    VectorXd hdop;
+};
+
+struct ObsData {
+    string station;
+    VectorXd epoch;
+    VectorXd index;
+    MatrixXd data;
+    VectorXd date;
+    MatrixXd time;
+    Vector3d rcvpos;
+    VectorXd type;
+};
+
+struct NavData {
+    MatrixXd eph;
+    MatrixXd index;
+    VectorXd ionprm;
+};
+
+void positioning(const ObsData& obs, const NavData& nav, int doy, const string& S_path) {
+    // 参数设置
+    int stt = 0;
+    int stp = 25;
+    int intv = 30;
+    int len_matrix = (stp - stt) * 3600 - 1;
+
+    Vector3d refpos = reffromIPPindex(obs.station);
+    if (refpos.isZero()) {
+        refpos = obs.rcvpos;
+    }
+    Vector3d refpos_lla = xyz2lla(refpos(0), refpos(1), refpos(2));
+
+    // 初始化结果结构体
+    PositioningResult userpos;
+    userpos.llh = MatrixXd::Constant(len_matrix, 3, NAN);
+    userpos.xyz = MatrixXd::Constant(len_matrix, 3, NAN);
+    userpos.bs = MatrixXd::Constant(len_matrix, 32, NAN);
+    userpos.br = VectorXd::Constant(len_matrix, NAN);
+    userpos.elevation = MatrixXd::Constant(len_matrix, 32, NAN);
+
+    DistError disterr;
+    disterr.horizontal = VectorXd::Constant(len_matrix, NAN);
+    disterr.EW = VectorXd::Constant(len_matrix, NAN);
+    disterr.NS = VectorXd::Constant(len_matrix, NAN);
+    disterr.height = VectorXd::Constant(len_matrix, NAN);
+
+    Model model;
+    model.tropo = MatrixXd::Constant(len_matrix, 32, NAN);
+    model.iono = MatrixXd::Constant(len_matrix, 32, NAN);
+    model.hdop = VectorXd::Constant(len_matrix, NAN);
+
+    MatrixXd G = MatrixXd::Zero(4, 4);
+
+    for (int mode = 1; mode <= 3; ++mode) {
+        Vector4d x0 = Vector4d::Zero();
+        Vector3d xyz0 = x0.head<3>();
+        double br = x0[3];
+
+        for (int i = (stt * 3600) + 1; i < (stp * 3600) - 1; i += intv) {
+            VectorXi eph_t = find(obs.epoch, i - 1);
+            VectorXi PRN = obs.index(eph_t);
+
+            if (PRN.size() < 4) continue;
+
+            double SOD = obs.epoch[eph_t[0]] + obs.date[3] * 3600 + obs.date[4] * 60 + obs.date[5];
+
+            VectorXd C1 = obs.data(eph_t, ismember(obs.type, "C2I"));
+
+            MatrixXd satpos(3, PRN.size());
+            VectorXd satclock(PRN.size());
+
+            for (int ii = 0; ii < PRN.size(); ++ii) {
+                Vector3d satpos_ii;
+                double satclock_ii;
+                tie(satpos_ii, satclock_ii) = satpos_xyz_sbias(SOD, PRN[ii], nav.eph, nav.index, obs.date, C1[ii]);
+                satpos.col(ii) = satpos_ii;
+                satclock[ii] = satclock_ii;
+            }
+
+            if (satclock.array().isNaN().count() < 4) continue;
+
+            // ... 省略部分代码，包含误差修正、求解方程等
+
+            // 保存计算结果和误差
+            userpos.hdop[i] = HDOP;
+            userpos.xyz.row(i) = xyz0.transpose();
+            userpos.llh.row(i) = xyz2lla(xyz0[0], xyz0[1], xyz0[2]).transpose();
+            userpos.bs.row(i) = sclockbias_m.transpose();
+            userpos.br[i] = br;
+            userpos.elevation.row(i) = elev_m.transpose();
+            model.tropo.row(i) = d_tropo.transpose();
+            model.iono.row(i) = d_iono.transpose();
+
+            // ... 保存其他结果
+        }
+
+        // 保存结果到文件
+        string year = to_string(obs.date[0]);
+        string month = to_string(obs.date[1]);
+        string date = to_string(obs.date[2]);
+        string filename = S_path + "mode_" + to_string(mode) + "/pos_m" + to_string(mode) + "_" + obs.station + "_" + year + "_" + month + "_" + date + ".txt";
+        ofstream fout(filename);
+        if (fout.is_open()) {
+            fout << "User position and errors saved." << endl;
+            fout.close();
+        }
+    }
+    cout << obs.station << " station Complete" << endl;
+}
+
+int main() {
+    // 示例数据，可以根据需要修改
+    ObsData obs;
+    NavData nav;
+    int doy = 120;
+    string S_path = "./results/";
+
+    positioning(obs, nav, doy, S_path);
+
+    return 0;
+}
